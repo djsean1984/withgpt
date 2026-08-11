@@ -1,7 +1,10 @@
-name: WeRead one-time sync
+name: WeRead weekly sync
 
 on:
   workflow_dispatch:
+  schedule:
+    # Every Monday at 04:00 UTC (about 06:00 in France during summer, 05:00 during winter)
+    - cron: '0 4 * * 1'
 
 jobs:
   sync:
