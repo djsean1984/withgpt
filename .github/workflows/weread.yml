@@ -1,13 +1,11 @@
-name: weread sync
+name: WeRead one-time sync
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
 
 jobs:
   sync:
-    name: Sync
+    name: Sync WeRead to Notion
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,6 +15,4 @@ jobs:
         with:
           weread-api-key: ${{ secrets.WEREAD_API_KEY }}
           notion-token: ${{ secrets.NOTION_TOKEN }}
-          notion-page: ${{ secrets.NOTION_PAGE }}
-          notion-database-id: ${{ secrets.NOTION_DATABASE_ID }}
           notion-data-source-id: ${{ secrets.NOTION_DATA_SOURCE_ID }}
