@@ -15,4 +15,4 @@ jobs:
         with:
           weread-api-key: ${{ secrets.WEREAD_API_KEY }}
           notion-token: ${{ secrets.NOTION_TOKEN }}
-          notion-data-source-id: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          notion-data-source-id: 2899b420-d71e-4701-b176-367b30ae695c
