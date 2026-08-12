@@ -203,7 +203,7 @@ def get_read_info(bookId):
     reading_progress = normalize_reading_progress(progress)
     finish_time = book.get("finishTime") or 0
     update_time = book.get("updateTime") or 0
-    if finish_time or progress >= 100:
+    if finish_time or progress >= 80:
         marked_status = 4
     elif update_time or book.get("isStartReading") or progress > 0:
         marked_status = 2
@@ -213,7 +213,7 @@ def get_read_info(bookId):
         "markedStatus": marked_status,
         "readingTime": book.get("recordReadingTime") or 0,
         "readingProgress": reading_progress,
-        "finishedDate": finish_time,
+        "finishedDate": finish_time or (update_time if progress >= 80 else 0),
     }
 
 
