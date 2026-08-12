@@ -5,7 +5,9 @@ import re
 import time
 from notion_client import Client
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from collections import defaultdict
 import hashlib
 from dotenv import load_dotenv
 from notion_client.errors import APIResponseError
@@ -37,6 +39,9 @@ WEREAD_URL = "https://weread.qq.com/"
 WEREAD_GATEWAY_URL = "https://i.weread.qq.com/api/agent/gateway"
 WEREAD_SKILL_VERSION = "1.0.4"
 NOTION_VERSION = "2026-03-11"
+DIARY_DATA_SOURCE_ID = os.getenv("DIARY_DATA_SOURCE_ID", "").strip()
+DIARY_LOOKBACK_DAYS = 14
+PARIS_TZ = ZoneInfo("Europe/Paris")
 BOOKMARK_CALLOUT_ICON = "〰️"
 NOTE_CALLOUT_ICON = "✍️"
 NOTION_TOKEN_PATTERN = re.compile(r"^(secret|ntn)_[A-Za-z0-9_-]{20,}$")
@@ -333,7 +338,125 @@ def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, catego
     # notion api 限制100个block
     response = client.pages.create(parent=parent, icon=icon,cover=icon, properties=properties)
     id = response["id"]
-    return id
+    return id, read_info
+
+
+def event_date(value):
+    value = to_number(value)
+    if value is None or value <= 0:
+        return None
+    if value > 10_000_000_000:
+        value /= 1000
+    return datetime.fromtimestamp(value, tz=timezone.utc).astimezone(PARIS_TZ).date()
+
+
+def item_event_date(item):
+    if not isinstance(item, dict):
+        return None
+    review = item.get("review") or {}
+    for source in (item, review):
+        for key in ("createTime", "updateTime", "markedTime"):
+            result = event_date(source.get(key))
+            if result:
+                return result
+    return None
+
+
+def collect_reading_events(events, title, read_info, bookmarks, reviews, summaries):
+    today = datetime.now(PARIS_TZ).date()
+    cutoff = today - timedelta(days=DIARY_LOOKBACK_DAYS)
+
+    finished = event_date((read_info or {}).get("finishedDate"))
+    if finished and cutoff <= finished <= today:
+        events[finished][title]["finished"] = True
+
+    for item in bookmarks:
+        day = item_event_date(item)
+        if day and cutoff <= day <= today:
+            events[day][title]["bookmarks"] += 1
+
+    for item in list(reviews) + list(summaries):
+        day = item_event_date(item)
+        if day and cutoff <= day <= today:
+            events[day][title]["notes"] += 1
+
+
+def diary_date_from_page(page):
+    parts = (page.get("properties") or {}).get("日期", {}).get("title", [])
+    for part in parts:
+        mention = part.get("mention") or {}
+        if mention.get("type") == "date":
+            start = (mention.get("date") or {}).get("start")
+            if start:
+                return datetime.fromisoformat(start[:10]).date()
+        text = part.get("plain_text") or ""
+        match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+        if match:
+            return datetime.fromisoformat(match.group(0)).date()
+    created = page.get("created_time")
+    if created:
+        return datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(PARIS_TZ).date()
+    return None
+
+
+def sync_diary_events(events):
+    if not DIARY_DATA_SOURCE_ID or not events:
+        return 0
+
+    cutoff = min(events)
+    response = client.request(
+        path=f"data_sources/{DIARY_DATA_SOURCE_ID}/query",
+        method="POST",
+        body={
+            "filter": {
+                "timestamp": "created_time",
+                "created_time": {"on_or_after": cutoff.isoformat()},
+            },
+            "page_size": 100,
+        },
+    )
+    pages = {diary_date_from_page(page): page for page in response.get("results", [])}
+    updated = 0
+
+    for day, books in sorted(events.items()):
+        page = pages.get(day)
+        if not page:
+            print(f"{day}: 没有已有日记，跳过阅读事件")
+            continue
+
+        lines = []
+        for book_title, counts in sorted(books.items()):
+            if counts["finished"]:
+                lines.append(f"📚 读完《{book_title}》")
+            bookmark_count = counts["bookmarks"]
+            note_count = counts["notes"]
+            if bookmark_count or note_count:
+                details = []
+                if bookmark_count:
+                    details.append(f"{bookmark_count}条划线")
+                if note_count:
+                    details.append(f"{note_count}条想法")
+                lines.append(f"📖《{book_title}》：" + "、".join(details))
+
+        prop = (page.get("properties") or {}).get("音乐 电视剧 电影 书 其他", {})
+        existing = "".join(item.get("plain_text", "") for item in prop.get("rich_text", []))
+        new_lines = [line for line in lines if line not in existing]
+        if not new_lines:
+            continue
+        content = existing.rstrip()
+        if content:
+            content += "\n"
+        content += "\n".join(new_lines)
+        client.pages.update(
+            page_id=page["id"],
+            properties={
+                "音乐 电视剧 电影 书 其他": get_rich_text(content[:2000])
+            },
+        )
+        updated += 1
+
+    print(f"已更新 {updated} 篇日记的微信读书事件")
+    return updated
 
 
 def add_children(id, children):
@@ -797,6 +920,9 @@ def sync():
     print(f"Notion Data Source ID: {data_source_id}")
     load_data_source_schema()
     latest_sort = get_sort()
+    diary_events = defaultdict(
+        lambda: defaultdict(lambda: {"finished": False, "bookmarks": 0, "notes": 0})
+    )
     books = get_notebooklist()
     if books != None:
         for index, book in enumerate(books):
@@ -819,7 +945,7 @@ def sync():
                 isbn, rating = get_bookinfo(bookId)
             else:
                 isbn, rating = "", None
-            id = insert_to_notion(
+            id, read_info = insert_to_notion(
                 title, bookId, cover, sort, author, isbn, rating, categories
             )
             chapter = get_chapter_info(bookId)
@@ -830,10 +956,20 @@ def sync():
                 bookmark_list,
                 key=lambda x: get_note_sort_key(x, chapter),
             )
+            collect_reading_events(
+                diary_events,
+                title,
+                read_info,
+                [item for item in bookmark_list if item.get("_callout_icon") != NOTE_CALLOUT_ICON],
+                reviews,
+                summary,
+            )
             children, grandchild = get_children(chapter, summary, bookmark_list)
             results = add_children(id, children)
             if len(grandchild) > 0 and results != None:
                 add_grandchild(grandchild, results)
+
+    sync_diary_events(diary_events)
 
 
 def main(argv=None):
